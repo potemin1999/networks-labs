@@ -1,0 +1,2 @@
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/week1)
+add_executable(ex1 ex1.c)
