@@ -8,18 +8,18 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <pthread.h>
-#include <zconf.h>
+#include <unistd.h>
 
 #define THREAD_COUNT    4
 #define SERVER_PORT     2000
 
-pthread_t        workers[THREAD_COUNT];
-char             data_buffer[1024];
-struct student_t student;
-int              counter;
+pthread_t workers[THREAD_COUNT];
+char      data_buffer[1024];
+int       counter;
 
 void *process_connection(void *data) {
     struct sockaddr_in client_addr;
+    struct student_t   student;
 
     socklen_t addr_len  = sizeof(client_addr);
     pthread_t thread    = pthread_self();
@@ -40,9 +40,9 @@ void *process_connection(void *data) {
         bzero(student.group, 16);
         strcpy(student.group, "Dropped");
         //sleep
-        printf("Worker %i started hard work\n",worker_id);
+        printf("Worker %i started hard work\n", worker_id);
         sleep(10);
-        printf("Worker %i finished hard work\n",worker_id);
+        printf("Worker %i finished hard work\n", worker_id);
         //send him back
         sent_recv_bytes = sendto(sockfd, (char *) &student, sizeof(struct student_t), 0,
                                  (struct sockaddr *) &client_addr, addr_len);
