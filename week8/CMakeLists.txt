@@ -1,0 +1,3 @@
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/week8)
+SET(CMAKE_EXE_LINKER_FLAGS "-pthread")
+add_executable(node2 node.c)
