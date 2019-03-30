@@ -1,6 +1,6 @@
 /**
  * Created by Ilya Potemin on 3/7/19.
- * Last updated 3/24/19
+ * Last updated 3/30/19
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,41 +20,29 @@ server_config_t server_config;
 int server_sock_fd;
 unsigned shutdown_required = 0;
 
-//server_worker - context of call
-//int - command
-//sockaddr_in - client info
-typedef int (*process_command_func_t)(server_worker_t *, int, sockaddr_in_t *);
-
-process_command_func_t processing_functions[32];
-
-#define SET_PF(func_name, func) processing_functions[func_name] = &func;
-
-//int flag_index
-//int argc
-//char** argv
-typedef int (*flag_processing_func_t)(int, int, char **);
-
-flag_processing_func_t flag_functions[64];
-
-#define SET_FF(flag_ascii, func) flag_functions[((int)flag_ascii)-64] = &func;
-
-void *ensure_buffer(server_worker_t *worker, int min_size){
-    if (worker->buffer_size < min_size) {
-        worker->buffer = worker->buffer ? realloc(worker->buffer, (size_t) min_size)
-                                        : malloc((size_t) min_size);
+__UTIL_FUNC
+void *ensure_buffer(server_worker_t *worker, int min_size) {
+    size_t buffer_size = worker->buffer_size;
+    void *buffer = worker->buffer;
+    size_t min = (size_t) min_size;
+    if (buffer_size < min_size) {
+        buffer = buffer ? realloc(buffer, min) : malloc(min);
     }
-    if (worker->buffer) {
-        bzero(worker->buffer, (size_t) min_size);
+    if (buffer) {
+        bzero(buffer, (size_t) min_size);
     }
-    return worker->buffer;
+    worker->buffer = buffer;
+    return buffer;
 }
 
+__UTIL_FUNC
 char *get_random_node_name() {
     char *name = (char *) malloc(16);
     sprintf(name, "name-%p", &name);
     return name;
 }
 
+__UTIL_FUNC
 int connect_to_addr(in_addr_t addr, uint16_t port) {
     sockaddr_in_t dest;
     dest.sin_family = AF_INET;
@@ -66,6 +54,7 @@ int connect_to_addr(in_addr_t addr, uint16_t port) {
     return socket_fd;
 }
 
+__UTIL_FUNC
 int connect_to(const char *ip, uint16_t port) {
     struct hostent *host;
     host = gethostbyname(ip);
@@ -74,6 +63,7 @@ int connect_to(const char *ip, uint16_t port) {
     return connect_to_addr(*((in_addr_t *) host->h_addr), port);
 }
 
+__UTIL_FUNC
 int bind_to(uint16_t port) {
     //create server socket
     int master_sock_tcp_fd = 0;
@@ -96,6 +86,7 @@ int bind_to(uint16_t port) {
     return master_sock_tcp_fd;
 }
 
+__UTIL_FUNC
 int dump_getsockname(int socket_fd) {
     sockaddr_in_t sin;
     socklen_t len = sizeof(sin);
@@ -108,43 +99,97 @@ int dump_getsockname(int socket_fd) {
     }
 }
 
+__UTIL_FUNC
 int read_config(server_config_t *server_conf) {
     //read name
+    if (server_conf->node_name) goto read_port;
     printf("Write server name (default is random) : ");
-    char name_buffer[256];
-    bzero(name_buffer, 256);
-    int name_scanned = scanf("%s", name_buffer);
+    EMPTY_BUFFER(name_buffer, 256)
+    int name_scanned = scanf("%[^ \n]", name_buffer);
     if (name_scanned) {
         size_t name_length = strlen(name_buffer);
-        char *name_str = malloc(name_length + 1);
+        char *name_str = (char *) malloc(name_length + 1);
         strcpy(name_str, name_buffer);
         server_conf->node_name = name_str;
     } else {
         server_conf->node_name = get_random_node_name();
     }
-    //read port
+
+    read_port: //start reading port
+    if (server_conf->port != 0) goto end;
     printf("Write server port (default 22022) : ");
     char port_buffer[8], *buffer_end;
     bzero(port_buffer, 8);
-    int port_scanned = scanf("%s", port_buffer);
+    int port_scanned = scanf("%[^ \n]", port_buffer);
     strcpy(server_conf->port_str, port_buffer);
     if (port_scanned) {
         server_conf->port = (in_port_t) strtoul(port_buffer, &buffer_end, 10);
     } else {
         server_conf->port = (in_port_t) SERVER_PORT;
     }
+
+    end:
     return 0;
 }
 
-//Enables transformation of multibytes types into network encoding
-int enable_network_type(int flag, int argc, char **argv){
-    UNUSED(flag)
+__UTIL_FUNC
+int read_startup_flags(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (*(argv[i]) != '-') {
+            LOGf(ERROR, "Flag %s is not a flag, check your configuration", argv[0])
+            exit(1);
+        }
+        char *argument = argv[i];
+        int index = (int) (argument[1] - 64);
+        flag_func_t func = flag_functions[index];
+        if (func == 0) {
+            LOGf(ERROR, "Unknown flag %s", argument)
+            exit(2);
+        }
+        int func_result = (*func)(i, argc, argv);
+        if (func_result < 0) {
+            LOGf(ERROR, "Flag %s can not be parsed %s", argument)
+            return func_result;
+        }
+        i += func_result;
+    }
+    return 0;
+}
+
+__FLAG_FUNC //Enables transformation of multi-byte types into network encoding
+int enable_network_type(int flag_index, int argc, char **argv) {
+    UNUSED(flag_index)
     UNUSED(argc)
     UNUSED(argv)
     server_config.enable_hton = 1;
+    LOG(INFO, "Network byte ordering enabled")
     return 0;
 }
 
+__FLAG_FUNC
+int set_server_port(int flag_index, int argc, char **argv) {
+    if (flag_index + 1 >= argc) {
+        return -1;
+    }
+    char port_buffer[8], *buffer_end;
+    strcpy(port_buffer, argv[flag_index + 1]);
+    int read = strtoul(port_buffer, &buffer_end, 10);
+    server_config.port = (in_port_t) read;
+    if (read != 0) {
+        LOGf(INFO, "Server port set: %hu", server_config.port)
+    }
+    return 1;
+}
+
+__CONSTRUCTOR(240) __UNUSED __FLAG_FUNC
+int make_default_config() {
+    server_config.port = 0;
+    server_config.node_name = 0;
+    server_config.enable_hton = 1;
+    bzero(server_config.node_address, 20);
+}
+
+__CLI_FUNC
 int do_bootstrap(const char *ip, uint16_t port) {
     LOG(INFO, "Retrieving nodes")
     int socket = connect_to(ip, port);
@@ -167,7 +212,7 @@ int do_bootstrap(const char *ip, uint16_t port) {
     //workaround
     node_buffer[0].address = *((in_addr_t *) gethostbyname(ip)->h_addr);
     for (int i = 0; i < list_size; i++) {
-        char node_address[20];
+        EMPTY_BUFFER(node_address, 20)
         inet_ntop(AF_INET, &(node_buffer[i].address), node_address, 20);
         LOGf(DEBUG, "Receiving node %s at %s:%d", node_buffer[i].name, node_address, node_buffer[i].port)
         storage_node_added(storage, node_buffer[i]);
@@ -192,7 +237,7 @@ int do_bootstrap(const char *ip, uint16_t port) {
     return 0;
 }
 
-//COMMAND_SYN; lab9
+__CLI_FUNC //COMMAND_SYN; lab9
 int do_syn(const char *ip, uint16_t port) {
     int socket = connect_to(ip, port);
     if (socket == -1) {
@@ -204,9 +249,8 @@ int do_syn(const char *ip, uint16_t port) {
     uint32_t command = htonl(COMMAND_SYN);
     send(socket, &command, 4, 0);
     //1: send info about us
-    char buffer_start[1024];
+    EMPTY_BUFFER(buffer_start, 1024)
     char *buffer = buffer_start;
-    bzero(buffer_start, 1024);
     int size = sprintf(buffer, "%s:%s:%hu:", server_config.node_name, server_config.node_address, server_config.port);
     buffer += size;
     //list files
@@ -246,15 +290,14 @@ int do_syn(const char *ip, uint16_t port) {
     return 0;
 }
 
-//COMMAND_REQUEST: lab9
+__CLI_FUNC //COMMAND_REQUEST: lab9
 int do_request(node_t *node, const char *dst_file_name, const char *remote_file_name) {
     int socket = connect_to_addr(node->address, node->port);
     FILE *file = fopen(dst_file_name, "wb");
     //send request file name
     uint32_t command = htonl(COMMAND_REQUEST);
     send(socket, &command, 4, 0);
-    char buffer[1024];
-    bzero(buffer, 1024);
+    EMPTY_BUFFER(buffer, 1024)
     strcpy(buffer, remote_file_name);
     send(socket, buffer, 1024, 0);
     LOGf(DEBUG, "requesting %s", buffer)
@@ -272,6 +315,7 @@ int do_request(node_t *node, const char *dst_file_name, const char *remote_file_
     return words_count;
 }
 
+__CLI_FUNC
 int do_pingall() {
     LOG(INFO, "Pinging known nodes")
     int start_size = storage->size;
@@ -299,6 +343,7 @@ int do_pingall() {
     return 0;
 }
 
+__CLI_FUNC
 int do_get_remote_file_info(node_t *node, const char *file_name) {
     int socket = connect_to_addr(node->address, node->port);
     size_t file_name_length = (short) strlen(file_name);
@@ -314,6 +359,7 @@ int do_get_remote_file_info(node_t *node, const char *file_name) {
     return file_length;
 }
 
+__CLI_FUNC
 int do_pull_file_part(node_t *node, const char *file_name, int offset, int length, void *buffer) {
     int socket = connect_to_addr(node->address, node->port);
     size_t file_name_length = (short) strlen(file_name);
@@ -332,6 +378,7 @@ int do_pull_file_part(node_t *node, const char *file_name, int offset, int lengt
     return bytes_received;
 }
 
+__CLI_FUNC
 int do_pull_file(node_t *node, const char *dst_file_name, const char *remote_file_name) {
     int file_size = do_get_remote_file_info(node, remote_file_name);
     if (file_size == -1) {
@@ -357,13 +404,12 @@ int do_pull_file(node_t *node, const char *dst_file_name, const char *remote_fil
     return bytes_written;
 }
 
-//COMMAND_SYN, lab 9
+__SERV_FUNC //COMMAND_SYN, lab 9
 int process_command_syn(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(worker)
     UNUSED(client_addr)
-    char buffer_holder[1024];
+    EMPTY_BUFFER(buffer_holder, 1024)
     char *buffer = buffer_holder;
-    bzero(buffer, 1024);
     ssize_t msg1size = recv(comm_socket, buffer, 1024, 0);
     if (msg1size <= 0) {
         LOG(ERROR, "Unable to parse 1st message")
@@ -371,8 +417,8 @@ int process_command_syn(server_worker_t *worker, int comm_socket, sockaddr_in_t 
     }
     node_t node;
     bzero(&node, sizeof(node_t));
-    char address_str[20], port_str[6], *port_end;
-    bzero(address_str, 20);
+    EMPTY_BUFFER(address_str, 20)
+    char port_str[6], *port_end;
     int read_chars = 0;
     sscanf(buffer, "%127[^:]:%19[^:]:%5[^:]:%n", node.name, address_str, port_str, &read_chars);
     buffer += read_chars;
@@ -389,8 +435,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, sockaddr_in_t 
         LOGf(INFO, "Received syn from new node %s at %s:%hu", node.name, address_str, node.port)
     }
     //read node files
-    char file_buffer[256];
-    bzero(file_buffer, 256);
+    EMPTY_BUFFER(file_buffer, 256)
     read_chars = 0;
     int limit = 0;
     while (limit < 100 && sscanf(buffer, "%255[^,]%n", file_buffer, &read_chars)) {
@@ -424,11 +469,11 @@ int process_command_syn(server_worker_t *worker, int comm_socket, sockaddr_in_t 
     return 0;
 }
 
-//COMMAND_REQUEST, lab 9
+__SERV_FUNC //COMMAND_REQUEST, lab 9
 int process_command_request(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(worker)
     UNUSED(client_addr)
-    char buffer[1024];
+    EMPTY_BUFFER(buffer, 1024)
     recv(comm_socket, buffer, 1024, 0);
     char *file_name = buffer;
     FILE *file = fopen(file_name, "rb");
@@ -461,7 +506,7 @@ int process_command_request(server_worker_t *worker, int comm_socket, sockaddr_i
     return 0;
 }
 
-//COMMAND_CONNECT
+__SERV_FUNC //COMMAND_CONNECT
 int process_command_connect(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(worker)
     UNUSED(client_addr)
@@ -490,7 +535,7 @@ int process_command_connect(server_worker_t *worker, int comm_socket, sockaddr_i
     return 0;
 }
 
-//COMMAND_RETRIEVE_NODES
+__SERV_FUNC //COMMAND_RETRIEVE_NODES
 int process_command_retrieve_nodes(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(worker)
     int length = storage->size + 1;
@@ -510,7 +555,7 @@ int process_command_retrieve_nodes(server_worker_t *worker, int comm_socket, soc
     return 0;
 }
 
-//COMMAND_PING
+__SERV_FUNC //COMMAND_PING
 int process_command_ping(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(worker)
     UNUSED(client_addr)
@@ -520,7 +565,7 @@ int process_command_ping(server_worker_t *worker, int comm_socket, sockaddr_in_t
     return 0;
 }
 
-//COMMAND_DISCONNECT
+__SERV_FUNC //COMMAND_DISCONNECT
 int process_command_disconnect(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(worker)
     UNUSED(client_addr)
@@ -540,7 +585,7 @@ int process_command_disconnect(server_worker_t *worker, int comm_socket, sockadd
     return 0;
 }
 
-//COMMAND_GET_FILE_INFO
+__SERV_FUNC //COMMAND_GET_FILE_INFO
 int process_command_get_file_info(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(client_addr)
     short int fn_length = 0;
@@ -561,7 +606,7 @@ int process_command_get_file_info(server_worker_t *worker, int comm_socket, sock
     return 0;
 }
 
-//COMMAND_TRANSFER
+__SERV_FUNC //COMMAND_TRANSFER
 int process_command_transfer(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     UNUSED(client_addr)
     short int fn_length = 0;
@@ -590,7 +635,7 @@ int process_command_transfer(server_worker_t *worker, int comm_socket, sockaddr_
     return 0;
 }
 
-//Command processing entry point
+__SERV_FUNC //Command processing entry point
 int process_comm_socket(server_worker_t *worker, int comm_socket) {
     uint32_t command = 0;
     sockaddr_in_t client_addr;
@@ -621,6 +666,7 @@ int process_comm_socket(server_worker_t *worker, int comm_socket) {
     return 0;
 }
 
+__SERV_FUNC
 void *server_main(void *data) {
     server_config_t *cfg = (server_config_t *) data;
     int server_socket_fd = 0;
@@ -653,10 +699,10 @@ void *server_main(void *data) {
     return 0;
 }
 
+__CLI_FUNC
 void *client_main(void) {
-    char buffer[512];
+    EMPTY_BUFFER(buffer, 512)
     while (1) {
-        bzero(buffer, 512);
         scanf("%s", buffer);
         if (strcmp(buffer, "exit") == 0) {
             LOG(OUT, "Exiting")
@@ -752,13 +798,14 @@ void *client_main(void) {
             LOGf(INFO, "File pull completed: received %d bytes", ret)
             continue;
         }
+        bzero(buffer, 512);
     }
     return 0;
 }
 
-__attribute__ ((constructor))
-__attribute__ ((unused))
-int pre_main() {
+__CONSTRUCTOR(200) __UNUSED
+int init_processing_functions() {
+    for (int i = 0; i < PROCESSING_FUNC_LENGTH; processing_functions[i] = 0, i++);
     SET_PF(COMMAND_SYN, process_command_syn)
     SET_PF(COMMAND_SYN, process_command_syn)
     SET_PF(COMMAND_SYN, process_command_syn)
@@ -769,18 +816,24 @@ int pre_main() {
     SET_PF(COMMAND_GET_FILE_INFO, process_command_get_file_info)
     SET_PF(COMMAND_TRANSFER, process_command_transfer)
     SET_PF(COMMAND_PING, process_command_ping)
-    SET_FF('n',enable_network_type)
-}
-
-int read_startup_flags(int argc,char** argv){
-
     return 0;
 }
 
+__CONSTRUCTOR(210) __UNUSED
+int init_flag_functions() {
+    for (int i = 0; i < FLAG_FUNC_LENGTH; flag_functions[i] = 0, i++);
+    SET_FF('n', enable_network_type)
+    SET_FF('p', set_server_port)
+    return 0;
+}
+
+__CONSTRUCTOR(255) __UNUSED
+int pre_main() { return 0; }
+
 int main(int argc, char **argv) {
     LOG(INFO, "Starting new node")
+    read_startup_flags(argc, argv);
     read_config(&server_config);
-    read_startup_flags(argc,argv);
     char hostname[64];
     printf("Write server ip: ");
     scanf("%s", hostname);
@@ -792,8 +845,5 @@ int main(int argc, char **argv) {
     pthread_join(server_thread, 0);
 }
 
-__attribute__ ((constructor))
-__attribute__ ((unused))
-int post_main() {
-
-}
+__DESTRUCTOR(255) __UNUSED
+int post_main() { return 0; }

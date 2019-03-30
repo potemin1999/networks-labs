@@ -147,18 +147,38 @@ typedef struct node node_t;
 typedef struct server_config server_config_t;
 typedef struct server_worker server_worker_t;
 
-char *get_random_node_name();
+#ifdef __GNUC__
+# define __PURE __attribute((pure))
+# define __UNUSED __attribute((unused))
+# define __DESTRUCTOR(priority) __attribute((destructor(priority)))
+# define __CONSTRUCTOR(priority) __attribute((constructor(priority)))
+#else
+# define __PURE
+# define __UNUSED
+# define __DESTRUCTOR
+# define __CONSTRUCTOR
+#endif
 
-int connect_to(const char *ip, uint16_t port);
+#define __CLI_FUNC
+#define __FLAG_FUNC
+#define __SERV_FUNC
+#define __UTIL_FUNC
 
-int bind_to(uint16_t port);
+#define EMPTY_BUFFER(var_name,size) char var_name[size]; bzero(var_name,size);
 
-int dump_getsockname(int socket_fd);
+#define PROCESSING_FUNC_LENGTH 32
+#define FLAG_FUNC_LENGTH 64
 
-int read_config(server_config_t *server_conf);
+typedef int (*process_command_func_t)(server_worker_t * /* context of call */, int /* command */,
+                                      sockaddr_in_t * /* client info */);
 
-int do_bootstrap(const char *ip, uint16_t port);
+//returns count of additionally read arguments
+typedef int (*flag_func_t)(int /* flag_index */, int /* argc */, char ** /* argv */);
 
-int process_comm_socket(server_worker_t *worker, int comm_socket);
+process_command_func_t processing_functions[PROCESSING_FUNC_LENGTH];
+flag_func_t flag_functions[FLAG_FUNC_LENGTH];
+
+#define SET_PF(func_name, func) processing_functions[func_name] = &func;
+#define SET_FF(flag_ascii, func) flag_functions[((int)flag_ascii)-64] = &func;
 
 #endif //NETWORKS_LABS_NODE_H
