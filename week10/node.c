@@ -246,7 +246,7 @@ int do_syn(const char *ip, uint16_t port) {
     } else {
         LOG(INFO, "Syn started")
     }
-    uint32_t command = htonl(COMMAND_SYN);
+    uint32_t command = HTONL(COMMAND_SYN);
     send(socket, &command, 4, 0);
     //1: send info about us
     EMPTY_BUFFER(buffer_start, 1024)
@@ -274,7 +274,7 @@ int do_syn(const char *ip, uint16_t port) {
     LOGf(DEBUG, "pushing %s to syn server", buffer_start)
 
     closedir(dir);
-    uint32_t stor_size = htonl(storage->size);
+    uint32_t stor_size = HTONL(storage->size);
     send(socket, &stor_size, 4, 0);
     usleep(50000);
     //3: send nodes one by one
@@ -295,7 +295,7 @@ int do_request(node_t *node, const char *dst_file_name, const char *remote_file_
     int socket = connect_to_addr(node->address, node->port);
     FILE *file = fopen(dst_file_name, "wb");
     //send request file name
-    uint32_t command = htonl(COMMAND_REQUEST);
+    uint32_t command = HTONL(COMMAND_REQUEST);
     send(socket, &command, 4, 0);
     EMPTY_BUFFER(buffer, 1024)
     strcpy(buffer, remote_file_name);
@@ -304,7 +304,7 @@ int do_request(node_t *node, const char *dst_file_name, const char *remote_file_
     int32_t words_count = 0;
     //receive words count
     recv(socket, &words_count, 4, 0);
-    words_count = (int32_t) ntohl((uint32_t) words_count);
+    words_count = (int32_t) NTOHL((uint32_t) words_count);
     //receive words
     for (int i = 0; i < words_count; i++) {
         bzero(buffer, 1024);
@@ -327,7 +327,7 @@ int do_pingall() {
             storage_node_removed(storage, *current_node);
             continue;
         }
-        uint32_t command = htonl(COMMAND_PING);
+        uint32_t command = HTONL(COMMAND_PING);
         send(socket, &command, 4, MSG_NOSIGNAL);
         command = 0;
         recv(socket, &command, 4, MSG_NOSIGNAL);
@@ -347,7 +347,7 @@ __CLI_FUNC
 int do_get_remote_file_info(node_t *node, const char *file_name) {
     int socket = connect_to_addr(node->address, node->port);
     size_t file_name_length = (short) strlen(file_name);
-    uint32_t command = htonl(COMMAND_GET_FILE_INFO);
+    uint32_t command = HTONL(COMMAND_GET_FILE_INFO);
     short int fn_len_short = (short int) file_name_length;
     //send get info request
     send(socket, &command, 4, 0);
@@ -363,7 +363,7 @@ __CLI_FUNC
 int do_pull_file_part(node_t *node, const char *file_name, int offset, int length, void *buffer) {
     int socket = connect_to_addr(node->address, node->port);
     size_t file_name_length = (short) strlen(file_name);
-    uint32_t command = htonl(COMMAND_TRANSFER);
+    uint32_t command = HTONL(COMMAND_TRANSFER);
     short int fn_len_short = (short int) file_name_length;
     //send transfer request
     send(socket, &command, 4, 0);
@@ -454,7 +454,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, sockaddr_in_t 
     } else {
         LOGf(INFO, "Peers count: %lu", peers_count)
     }
-    peers_count = ntohl(peers_count);
+    peers_count = NTOHL(peers_count);
     for (uint32_t i = 0; i < peers_count && i < 1000; i++) {
         node_t peer_node;
         recv(comm_socket, buffer, 1024, 0);
@@ -479,7 +479,7 @@ int process_command_request(server_worker_t *worker, int comm_socket, sockaddr_i
     FILE *file = fopen(file_name, "rb");
     if (file == 0) {
         int32_t words_count = -1;
-        words_count = (int32_t) htonl((uint32_t) words_count);
+        words_count = (int32_t) HTONL((uint32_t) words_count);
         send(comm_socket, &words_count, 4, 0);
         return -1;
     }
@@ -492,7 +492,7 @@ int process_command_request(server_worker_t *worker, int comm_socket, sockaddr_i
             if (buffer[i] == ' ' || buffer[i] == '\0') words_count++;
         }
     }
-    int32_t words_count_n = (int32_t) htonl((uint32_t) words_count);
+    int32_t words_count_n = (int32_t) HTONL((uint32_t) words_count);
     send(comm_socket, &words_count_n, 4, 0);
     //send word by word
     fseek(file, 0, SEEK_SET);
@@ -641,7 +641,7 @@ int process_comm_socket(server_worker_t *worker, int comm_socket) {
     sockaddr_in_t client_addr;
     socklen_t addr_len = sizeof(sockaddr_t);
     ssize_t read_bytes = recvfrom(comm_socket, &command, 4, 0, (sockaddr_t *) &client_addr, &addr_len);
-    command = ntohl(command);
+    command = NTOHL(command);
     if (read_bytes == 0)
         return -1;
     switch (command) {

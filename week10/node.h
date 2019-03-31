@@ -178,7 +178,10 @@ typedef int (*flag_func_t)(int /* flag_index */, int /* argc */, char ** /* argv
 process_command_func_t processing_functions[PROCESSING_FUNC_LENGTH];
 flag_func_t flag_functions[FLAG_FUNC_LENGTH];
 
-#define SET_PF(func_name, func) processing_functions[func_name] = &func;
-#define SET_FF(flag_ascii, func) flag_functions[((int)flag_ascii)-64] = &func;
+#define SET_PF(func_name, func) processing_functions[func_name] = &(func);
+#define SET_FF(flag_ascii, func) flag_functions[((int)(flag_ascii))-64] = &(func);
+
+#define HTONL(value) ( server_config.enable_hton ? htonl(value) : (value) )
+#define NTOHL(value) ( server_config.enable_hton ? ntohl(value) : (value) )
 
 #endif //NETWORKS_LABS_NODE_H
