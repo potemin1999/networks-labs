@@ -108,6 +108,19 @@ int name##_map_put(name##_map_t *map, uint32_t key, type_t value){              
     map->size += 1;                                                             \
     return index;                                                               \
 }                                                                               \
+type_t* name##_map_get(name##_map_t *map, uint32_t key){                        \
+    int index = name##_map_get_index_by_hash(map, key);                         \
+    int probes = 0;                                                             \
+    name##_map_entry_t *entries = map->entries;                                 \
+    if (entries[index].key == key && entries[index].in_use)                     \
+        return &(entries[index].value);                                         \
+    while (probes++ < 10 && entries[index].in_use                               \
+                         && entries[index].key != key) {                        \
+        index = (index + 1) % map->capacity;                                    \
+    }                                                                           \
+    if (probes == 10) return 0;                                                 \
+    return &(entries[index].value);                                             \
+}                                                                               \
 int name##_map_remove(name##_map_t *map,uint32_t key,type_t value){             \
     int index = name##_map_get_index_by_hash(map, key);                         \
     int probes = 0;                                                             \
