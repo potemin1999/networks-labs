@@ -22,8 +22,8 @@ struct name##_map {                                                             
 };                                                                              \
 typedef struct name##_map name##_map_t;                                         \
 struct name##_map_iterator {                                                    \
-node_map_t *map;                                                                \
-node_map_entry_t *current_entry;                                                \
+name##_map_t *map;                                                              \
+name##_map_entry_t *current_entry;                                              \
 };                                                                              \
 typedef struct name##_map_iterator name##_map_iterator_t;                       \
 int name##_map_get_index_by_hash(name##_map_t *map, uint32_t key_hash) {        \

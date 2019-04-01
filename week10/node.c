@@ -15,6 +15,9 @@
 #include "node.h"
 #include "storage.h"
 
+CREATE_HASH_MAP(clients,client_info_t)
+
+clients_map_t clients;
 storage_t *storage;
 pthread_t server_thread;
 server_config_t server_config;

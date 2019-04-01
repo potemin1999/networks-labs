@@ -127,6 +127,13 @@ struct node {
 #define NODE_HASH(node) \
     ((uint32_t) (node)->address & (node)->port)
 
+struct client_info{
+    in_addr_t address;
+    in_port_t port;
+    int32_t connections;
+    uint8_t trusted;
+};
+
 struct server_config {
     in_port_t port;
     char port_str[6];
@@ -144,6 +151,7 @@ typedef struct sockaddr sockaddr_t;
 typedef struct sockaddr_in sockaddr_in_t;
 
 typedef struct node node_t;
+typedef struct client_info client_info_t;
 typedef struct server_config server_config_t;
 typedef struct server_worker server_worker_t;
 
