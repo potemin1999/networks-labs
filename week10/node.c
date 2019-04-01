@@ -10,11 +10,15 @@
 #include <zconf.h>
 #include <arpa/inet.h>
 #include <dirent.h>
+#include <signal.h>
 #include "log.h"
 #include "node.h"
 #include "storage.h"
 
-map_t *storage;
+CREATE_HASH_MAP(clients,client_info_t)
+
+clients_map_t clients;
+storage_t *storage;
 pthread_t server_thread;
 server_config_t server_config;
 int server_sock_fd;
@@ -827,14 +831,22 @@ int init_flag_functions() {
     return 0;
 }
 
+void on_exit_signal(int signal){
+    LOG(INFO,"Stop signal received, exiting");
+    exit(signal);
+}
 __CONSTRUCTOR(255) __UNUSED
-int pre_main() { return 0; }
+int pre_main() {
+    signal(SIGINT,on_exit_signal);
+    signal(SIGTERM, on_exit_signal);
+    return 0;
+}
 
 int main(int argc, char **argv) {
     LOG(INFO, "Starting new node")
     read_startup_flags(argc, argv);
     read_config(&server_config);
-    char hostname[64];
+    EMPTY_BUFFER(hostname,64);
     printf("Write server ip: ");
     scanf("%s", hostname);
     struct hostent *host_entry = gethostbyname(hostname);
