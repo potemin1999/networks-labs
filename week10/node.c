@@ -1,6 +1,6 @@
 /**
  * Created by Ilya Potemin on 3/7/19.
- * Last updated 3/30/19
+ * Last updated 4/3/19
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +27,7 @@
 #define CLIENT_DUMP_METRICS(client_ptr){             \
     LOGf(INFO, "client %u : current connections[%d],"\
             "failed syncs[%d], failed requests[%d], "\
-            "trust [%d]"                             \
+            "trust [%d]",                            \
         client_ptr,client_ptr->cur_conn,             \
         client_ptr->failed_syn,client_ptr->cur_conn, \
         client_ptr->trusted)                         \
@@ -357,11 +357,6 @@ int do_bootstrap(const char *ip, uint16_t port) {
 int do_syn_sock(int socket) {
     uint32_t command = HTONL(COMMAND_SYN);
     SEND__WARN_INT(socket, &command, 4)
-    /*ssize_t command_sent_size = send(socket, &command, 4, MSG_NOSIGNAL);
-    if (command_sent_size == -1){
-        LOG(WARN,)
-        return -1;
-    }*/
     //1: send info about us
     EMPTY_BUFFER(buffer_start, 1024)
     char *buffer = buffer_start;
@@ -384,10 +379,6 @@ int do_syn_sock(int socket) {
         }
     }
     SEND__WARN_INT(socket, buffer_start, 1024)
-    /*ssize_t files_sent_size = send(socket, buffer_start, 1024, MSG_NOSIGNAL);
-    if (files_sent_size == -1){
-        return -1;
-    }*/
     LOGf(DEBUG, "pushing %s to syn server", buffer_start)
 
     closedir(dir);
@@ -404,10 +395,6 @@ int do_syn_sock(int socket) {
         bzero(buffer, 1024);
         sprintf(buffer, "%s:%s:%hu", current_node->name, node_addr, current_node->port);
         SEND__WARN_INT(socket, buffer, 1024)
-        /*ssize_t file_sent_size = send(socket, buffer, 1024, 0);
-        if (file_sent_size == -1){
-            return -1;
-        }*/
     }
     return 0;
 }

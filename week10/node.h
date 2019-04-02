@@ -1,6 +1,6 @@
 /**
  * Created by Ilya Potemin on 3/7/19.
- * Last updated 3/24/19
+ * Last updated 4/3/19
  */
 
 #ifndef NETWORKS_LABS_NODE_H
