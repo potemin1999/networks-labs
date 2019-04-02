@@ -15,14 +15,21 @@
 #include "node.h"
 #include "storage.h"
 
-CREATE_HASH_MAP(clients,client_info_t)
+CREATE_HASH_MAP(clients, client_info_t)
 
 clients_map_t clients;
 storage_t *storage;
 pthread_t server_thread;
+server_worker_t server_workers[SERVER_WORKERS];
 server_config_t server_config;
 int server_sock_fd;
 unsigned shutdown_required = 0;
+
+server_worker_t *get_free_worker() {
+    for (int i = 0; i < SERVER_WORKERS; i++) {
+
+    }
+}
 
 __UTIL_FUNC
 void *ensure_buffer(server_worker_t *worker, int min_size) {
@@ -160,6 +167,32 @@ int read_startup_flags(int argc, char **argv) {
     return 0;
 }
 
+__UTIL_FUNC
+int is_trusted_client(in_addr_t address, in_port_t port) {
+    uint32_t hash = CLIENT_HASH(address, port);
+    client_info_t *info = clients_map_get(&clients, hash);
+    if (!info) {
+        client_info_t client_info;
+        client_info.port = port;
+        client_info.address = address;
+        client_info.cur_conn = 0;
+        client_info.failed_syn = 0;
+        client_info.trusted = 2;
+        clients_map_put(&clients, hash, client_info);
+        return 1;
+    }
+    if (info->cur_conn > 2) {
+        if (info->cur_conn > 5) {
+            info->trusted = 0;
+            return 0;
+        } else {
+            info->trusted = 1;
+            return 1;
+        }
+    }
+    return 2;
+}
+
 __FLAG_FUNC //Enables transformation of multi-byte types into network encoding
 int enable_network_type(int flag_index, int argc, char **argv) {
     UNUSED(flag_index)
@@ -191,6 +224,7 @@ int make_default_config() {
     server_config.node_name = 0;
     server_config.enable_hton = 1;
     bzero(server_config.node_address, 20);
+    return 0;
 }
 
 __CLI_FUNC
@@ -409,9 +443,8 @@ int do_pull_file(node_t *node, const char *dst_file_name, const char *remote_fil
 }
 
 __SERV_FUNC //COMMAND_SYN, lab 9
-int process_command_syn(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
+int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
-    UNUSED(client_addr)
     EMPTY_BUFFER(buffer_holder, 1024)
     char *buffer = buffer_holder;
     ssize_t msg1size = recv(comm_socket, buffer, 1024, 0);
@@ -470,13 +503,14 @@ int process_command_syn(server_worker_t *worker, int comm_socket, sockaddr_in_t 
         if (res == -1) continue;
         LOGf(DEBUG, "New node retrieved: %s at %s:%hu", peer_node.name, address_str, peer_node.port)
     }
+    client->failed_syn -= client->failed_syn > 2 ? 2 : client->failed_syn;
+    client->trusted = 3;
     return 0;
 }
 
 __SERV_FUNC //COMMAND_REQUEST, lab 9
-int process_command_request(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
+int process_command_request(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
-    UNUSED(client_addr)
     EMPTY_BUFFER(buffer, 1024)
     recv(comm_socket, buffer, 1024, 0);
     char *file_name = buffer;
@@ -511,9 +545,8 @@ int process_command_request(server_worker_t *worker, int comm_socket, sockaddr_i
 }
 
 __SERV_FUNC //COMMAND_CONNECT
-int process_command_connect(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
+int process_command_connect(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
-    UNUSED(client_addr)
     node_t node;
     UNUSED(node.name_length)
     recv(comm_socket, &node, sizeof(node_t), 0);
@@ -540,7 +573,7 @@ int process_command_connect(server_worker_t *worker, int comm_socket, sockaddr_i
 }
 
 __SERV_FUNC //COMMAND_RETRIEVE_NODES
-int process_command_retrieve_nodes(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
+int process_command_retrieve_nodes(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
     int length = storage->size + 1;
     send(comm_socket, &length, 4, 0);
@@ -555,14 +588,13 @@ int process_command_retrieve_nodes(server_worker_t *worker, int comm_socket, soc
     while ((current_node = storage_next(&iterator)) != 0) {
         send(comm_socket, current_node, sizeof(node_t), 0);
     }
-    LOGf(DEBUG, "%d nodes are written to %u", storage->size, client_addr->sin_addr.s_addr)
+    LOGf(DEBUG, "%d nodes are written to %u", storage->size, client->address)
     return 0;
 }
 
 __SERV_FUNC //COMMAND_PING
-int process_command_ping(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
+int process_command_ping(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
-    UNUSED(client_addr)
     char *pong_str = "pong";
     send(comm_socket, pong_str, 4, 0);
     LOG(DEBUG, "Ponged")
@@ -570,9 +602,8 @@ int process_command_ping(server_worker_t *worker, int comm_socket, sockaddr_in_t
 }
 
 __SERV_FUNC //COMMAND_DISCONNECT
-int process_command_disconnect(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
+int process_command_disconnect(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
-    UNUSED(client_addr)
     node_t node;
     recv(comm_socket, &node, sizeof(node_t), 0);
     int result = storage_node_removed(storage, node);
@@ -590,8 +621,7 @@ int process_command_disconnect(server_worker_t *worker, int comm_socket, sockadd
 }
 
 __SERV_FUNC //COMMAND_GET_FILE_INFO
-int process_command_get_file_info(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
-    UNUSED(client_addr)
+int process_command_get_file_info(server_worker_t *worker, int comm_socket, client_info_t *client) {
     short int fn_length = 0;
     char *filename = 0;
     recv(comm_socket, &fn_length, 2, 0);
@@ -611,8 +641,7 @@ int process_command_get_file_info(server_worker_t *worker, int comm_socket, sock
 }
 
 __SERV_FUNC //COMMAND_TRANSFER
-int process_command_transfer(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
-    UNUSED(client_addr)
+int process_command_transfer(server_worker_t *worker, int comm_socket, client_info_t *client) {
     short int fn_length = 0;
     char *filename = 0;
     int offset = 0;
@@ -640,11 +669,11 @@ int process_command_transfer(server_worker_t *worker, int comm_socket, sockaddr_
 }
 
 __SERV_FUNC //Command processing entry point
-int process_comm_socket(server_worker_t *worker, int comm_socket) {
+int process_comm_socket(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
+    uint32_t client_hash = CLIENT_SOCKADDR_P_HASH(client_addr);
+    client_info_t *client = clients_map_get(&clients, client_hash);
     uint32_t command = 0;
-    sockaddr_in_t client_addr;
-    socklen_t addr_len = sizeof(sockaddr_t);
-    ssize_t read_bytes = recvfrom(comm_socket, &command, 4, 0, (sockaddr_t *) &client_addr, &addr_len);
+    ssize_t read_bytes = recv(comm_socket, &command, 4, 0);
     command = NTOHL(command);
     if (read_bytes == 0)
         return -1;
@@ -659,15 +688,30 @@ int process_comm_socket(server_worker_t *worker, int comm_socket) {
         case COMMAND_PING: {
             LOGf(DEBUG, "received command %u", command)
             process_command_func_t func = processing_functions[command];
-            (*func)(worker, comm_socket, &client_addr);
+            (*func)(worker, comm_socket, client);
             break;
         }
         default: {
             LOGf(WARN, "command not recognised: %u", command)
-            process_command_ping(worker, comm_socket, &client_addr);
+            process_command_ping(worker, comm_socket, client);
         }
     }
     return 0;
+}
+
+__SERV_FUNC
+void *server_worker_main(void *data) {
+    server_worker_t *this_worker = (server_worker_t *) data;
+    int socket = this_worker->client_socket;
+    sockaddr_in_t *client_addr = (sockaddr_in_t *) this_worker->data;
+    process_comm_socket(this_worker, socket, client_addr);
+    this_worker->busy = 0;
+    pthread_exit(0);
+}
+
+__SERV_FUNC
+void *server_pinger_main(void *data) {
+
 }
 
 __SERV_FUNC
@@ -696,7 +740,20 @@ void *server_main(void *data) {
             LOGf(ERROR, "Invalid communication socket: %i", socket)
             continue;
         }
-        process_comm_socket(&main_worker, socket);
+        if (is_trusted_client(client_addr.sin_addr.s_addr, client_addr.sin_port) == 0) {
+            close(socket);
+        }
+        server_worker_t free_worker;// = get_free_worker();
+        /*if (!free_worker){
+            LOG(ERROR, "No free server workers left")
+            close(socket);
+            continue;
+        }*/
+        free_worker.busy = 1;
+        free_worker.data = &client_addr;
+        free_worker.client_socket = socket;
+        pthread_create(&(free_worker.thread), 0, server_worker_main, &free_worker);
+        //server_worker_main(&free_worker);
         //close(socket);
     }
     storage_destroy(storage);
@@ -831,13 +888,14 @@ int init_flag_functions() {
     return 0;
 }
 
-void on_exit_signal(int signal){
-    LOG(INFO,"Stop signal received, exiting");
+void on_exit_signal(int signal) {
+    LOG(INFO, "Stop signal received, exiting");
     exit(signal);
 }
+
 __CONSTRUCTOR(255) __UNUSED
 int pre_main() {
-    signal(SIGINT,on_exit_signal);
+    signal(SIGINT, on_exit_signal);
     signal(SIGTERM, on_exit_signal);
     return 0;
 }
@@ -846,7 +904,7 @@ int main(int argc, char **argv) {
     LOG(INFO, "Starting new node")
     read_startup_flags(argc, argv);
     read_config(&server_config);
-    EMPTY_BUFFER(hostname,64);
+    EMPTY_BUFFER(hostname, 64);
     printf("Write server ip: ");
     scanf("%s", hostname);
     struct hostent *host_entry = gethostbyname(hostname);

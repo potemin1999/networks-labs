@@ -11,6 +11,8 @@
 
 #define SERVER_PORT 22022
 
+#define SERVER_WORKERS 8
+
 /**
  * Request:
  *      filename = null terminated string
@@ -127,12 +129,19 @@ struct node {
 #define NODE_HASH(node) \
     ((uint32_t) (node)->address & (node)->port)
 
-struct client_info{
+struct client_info {
     in_addr_t address;
     in_port_t port;
-    int32_t connections;
+    int32_t cur_conn;
+    int32_t failed_syn;
     uint8_t trusted;
 };
+
+#define CLIENT_HASH(address, port) \
+    ((uint32_t) ((address)&(port)))
+
+#define CLIENT_SOCKADDR_P_HASH(sockaddr) \
+    ((uint32_t) (sockaddr->sin_addr.s_addr, sockaddr->sin_port))
 
 struct server_config {
     in_port_t port;
@@ -144,7 +153,11 @@ struct server_config {
 
 struct server_worker {
     void *buffer;
+    void *data;
+    int client_socket;
     size_t buffer_size;
+    pthread_t thread;
+    uint8_t busy;
 };
 
 typedef struct sockaddr sockaddr_t;
@@ -172,13 +185,13 @@ typedef struct server_worker server_worker_t;
 #define __SERV_FUNC
 #define __UTIL_FUNC
 
-#define EMPTY_BUFFER(var_name,size) char var_name[size]; bzero(var_name,size);
+#define EMPTY_BUFFER(var_name, size) char var_name[size]; bzero(var_name,size);
 
 #define PROCESSING_FUNC_LENGTH 32
 #define FLAG_FUNC_LENGTH 64
 
 typedef int (*process_command_func_t)(server_worker_t * /* context of call */, int /* command */,
-                                      sockaddr_in_t * /* client info */);
+                                      client_info_t * /* client info */);
 
 //returns count of additionally read arguments
 typedef int (*flag_func_t)(int /* flag_index */, int /* argc */, char ** /* argv */);
