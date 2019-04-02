@@ -12,6 +12,9 @@
 #define SERVER_PORT 22022
 
 #define MAX_SERVER_WORKERS 8
+#define CLIENT_MAX_CONNECTIONS 10
+#define CLIENT_MAX_SYN_FAILS 5
+#define CLIENT_MAX_REQ_FAILS
 
 /**
  * Request:
@@ -134,9 +137,9 @@
 
 struct node {
     //uint32_t = 4 bytes
-    in_addr_t address __PACKED;
+    in_addr_t address;
     //uint16_t = 2 bytes
-    in_port_t port __PACKED;
+    in_port_t port;
     //1 bytes
     uint8_t name_length;
     //name_length bytes
@@ -151,15 +154,13 @@ struct client_info {
     in_port_t port;
     int32_t cur_conn;
     int32_t failed_syn;
-    uint8_t trusted;
+    int32_t failed_req;
+    uint8_t trusted __UNUSED;
     pthread_mutex_t lock;
 };
 
 #define CLIENT_HASH(address, port) \
-    ((uint32_t) ((address)&(port)))
-
-#define CLIENT_SOCKADDR_P_HASH(sockaddr) \
-    ((uint32_t) (sockaddr->sin_addr.s_addr, sockaddr->sin_port))
+    ((uint32_t) (address))
 
 struct server_config {
     in_port_t port;
@@ -171,11 +172,11 @@ struct server_config {
 
 struct server_worker {
     void *buffer;
-    void *data;
+    in_addr_t client_addr;
+    in_port_t client_port;
     int client_socket;
     size_t buffer_size;
     pthread_t thread;
-    uint8_t busy;
 };
 
 typedef struct sockaddr sockaddr_t;

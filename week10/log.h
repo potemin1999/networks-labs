@@ -31,6 +31,7 @@ void __log_impl(const char *level, const char *format, ...) {
     tm_info = localtime(&timer);
     strftime(buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
     printf("%20.26s ", buffer);
+    printf(" [%8.8lu] ", pthread_self());
     printf("%s%5.5s%s : %s", __COLOR_YELLOW, level, __COLOR_RESET, __COLOR_WHITE);
     va_list list;
     va_start(list, format);
