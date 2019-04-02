@@ -15,20 +15,47 @@
 #include "node.h"
 #include "storage.h"
 
-CREATE_HASH_MAP(clients, client_info_t)
+#define EMPTY_BUFFER(var_name, size) char var_name[size]; bzero(var_name,size);
+#define SET_PF(func_name, func) processing_functions[func_name] = &(func);
+#define SET_FF(flag_ascii, func) flag_functions[((int)(flag_ascii))-64] = &(func);
+#define HTONL(value) ( server_config.enable_hton ? htonl(value) : (value) )
+#define NTOHL(value) ( server_config.enable_hton ? ntohl(value) : (value) )
 
+#define LOCK(mutex_ptr) pthread_mutex_lock(mutex_ptr)
+#define UNLOCK(mutex_ptr) pthread_mutex_unlock(mutex_ptr)
+
+#define CLIENT_MOD_VAR(client_ptr, var_name, value){    \
+    LOCK(&client_ptr->lock);                            \
+    client_ptr->var_name += (value);                    \
+    UNLOCK(&client_ptr->lock);                          \
+    }
+#define CLIENT_MOD_FAILEDSYN(client_ptr, value) \
+    CLIENT_MOD_VAR(client_ptr,failed_syn,value)
+#define CLIENT_MOD_CURCONN(client_ptr, value)   \
+    CLIENT_MOD_VAR(client_ptr,cur_conn,value)
+
+
+CREATE_HASH_MAP(clients, client_info_t)
 clients_map_t clients;
 storage_t *storage;
 pthread_t server_thread;
-server_worker_t server_workers[SERVER_WORKERS];
+uint32_t server_workers = 0;
 server_config_t server_config;
 int server_sock_fd;
 unsigned shutdown_required = 0;
+process_command_func_t processing_functions[PROCESSING_FUNC_LENGTH];
+flag_func_t flag_functions[FLAG_FUNC_LENGTH];
 
-server_worker_t *get_free_worker() {
-    for (int i = 0; i < SERVER_WORKERS; i++) {
-
-    }
+__UTIL_FUNC
+server_worker_t *get_free_worker(int comm_socket, sockaddr_in_t *client_addr) {
+    if (server_workers >= MAX_SERVER_WORKERS)
+        return 0;
+    size_t worker_size = sizeof(server_worker_t);
+    server_worker_t *worker = (server_worker_t *) malloc(worker_size);
+    worker->busy = 1;
+    worker->data = &client_addr;
+    worker->client_socket = comm_socket;
+    return worker;
 }
 
 __UTIL_FUNC
@@ -181,16 +208,19 @@ int is_trusted_client(in_addr_t address, in_port_t port) {
         clients_map_put(&clients, hash, client_info);
         return 1;
     }
+    LOCK(&info->lock);
+    int ret_value = 2;
     if (info->cur_conn > 2) {
         if (info->cur_conn > 5) {
             info->trusted = 0;
-            return 0;
+            ret_value = 0;
         } else {
             info->trusted = 1;
-            return 1;
+            ret_value = 1;
         }
     }
-    return 2;
+    UNLOCK(&info->lock);
+    return ret_value;
 }
 
 __FLAG_FUNC //Enables transformation of multi-byte types into network encoding
@@ -450,6 +480,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     ssize_t msg1size = recv(comm_socket, buffer, 1024, 0);
     if (msg1size <= 0) {
         LOG(ERROR, "Unable to parse 1st message")
+        CLIENT_MOD_FAILEDSYN(client, 1)
         return 1;
     }
     node_t node;
@@ -463,6 +494,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     struct hostent *host = gethostbyname(address_str);
     if (!host) {
         LOG(ERROR, "Unable to parse hostent")
+        CLIENT_MOD_FAILEDSYN(client, 1)
         return 11;
     }
     node.address = *((in_addr_t *) host->h_addr);
@@ -487,6 +519,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     ssize_t msg2size = recv(comm_socket, &peers_count, 4, 0);
     if (msg2size != 4) {
         LOGf(ERROR, "Invalid peers value size: %lu", msg2size)
+        CLIENT_MOD_FAILEDSYN(client, 1)
         return 2;
     } else {
         LOGf(INFO, "Peers count: %lu", peers_count)
@@ -503,8 +536,10 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
         if (res == -1) continue;
         LOGf(DEBUG, "New node retrieved: %s at %s:%hu", peer_node.name, address_str, peer_node.port)
     }
+    LOCK(&client->lock);
     client->failed_syn -= client->failed_syn > 2 ? 2 : client->failed_syn;
     client->trusted = 3;
+    UNLOCK(&client->lock);
     return 0;
 }
 
@@ -672,11 +707,17 @@ __SERV_FUNC //Command processing entry point
 int process_comm_socket(server_worker_t *worker, int comm_socket, sockaddr_in_t *client_addr) {
     uint32_t client_hash = CLIENT_SOCKADDR_P_HASH(client_addr);
     client_info_t *client = clients_map_get(&clients, client_hash);
+    CLIENT_MOD_CURCONN(client,1)
     uint32_t command = 0;
     ssize_t read_bytes = recv(comm_socket, &command, 4, 0);
     command = NTOHL(command);
-    if (read_bytes == 0)
+    if (read_bytes == 0) {
+        LOCK(&client->lock);
+        ++client->failed_syn;
+        --client->cur_conn;
+        UNLOCK(&client->lock);
         return -1;
+    }
     switch (command) {
         case COMMAND_SYN:
         case COMMAND_REQUEST:
@@ -696,6 +737,7 @@ int process_comm_socket(server_worker_t *worker, int comm_socket, sockaddr_in_t 
             process_command_ping(worker, comm_socket, client);
         }
     }
+    CLIENT_MOD_CURCONN(client,-1)
     return 0;
 }
 
@@ -706,6 +748,7 @@ void *server_worker_main(void *data) {
     sockaddr_in_t *client_addr = (sockaddr_in_t *) this_worker->data;
     process_comm_socket(this_worker, socket, client_addr);
     this_worker->busy = 0;
+    close(socket);
     pthread_exit(0);
 }
 
@@ -742,19 +785,15 @@ void *server_main(void *data) {
         }
         if (is_trusted_client(client_addr.sin_addr.s_addr, client_addr.sin_port) == 0) {
             close(socket);
+            continue;
         }
-        server_worker_t free_worker;// = get_free_worker();
-        /*if (!free_worker){
-            LOG(ERROR, "No free server workers left")
+        server_worker_t *free_worker = get_free_worker(socket, &client_addr);
+        if (!free_worker) {
+            LOG(ERROR, "New worker can not be allocated")
             close(socket);
             continue;
-        }*/
-        free_worker.busy = 1;
-        free_worker.data = &client_addr;
-        free_worker.client_socket = socket;
-        pthread_create(&(free_worker.thread), 0, server_worker_main, &free_worker);
-        //server_worker_main(&free_worker);
-        //close(socket);
+        }
+        pthread_create(&free_worker->thread, 0, server_worker_main, free_worker);
     }
     storage_destroy(storage);
     return 0;
@@ -916,4 +955,7 @@ int main(int argc, char **argv) {
 }
 
 __DESTRUCTOR(255) __UNUSED
-int post_main() { return 0; }
+int post_main() {
+    LOG(INFO, "Node stopped")
+    return 0;
+}

@@ -14,6 +14,7 @@ struct name##_map_entry {                                                       
     type_t value;                                                               \
 };                                                                              \
 typedef struct name##_map_entry name##_map_entry_t;                             \
+                                                                                \
 struct name##_map {                                                             \
     float max_load_factor;                                                      \
     uint32_t size;                                                              \
@@ -21,11 +22,13 @@ struct name##_map {                                                             
     name##_map_entry_t *entries;                                                \
 };                                                                              \
 typedef struct name##_map name##_map_t;                                         \
+                                                                                \
 struct name##_map_iterator {                                                    \
-name##_map_t *map;                                                              \
-name##_map_entry_t *current_entry;                                              \
+    name##_map_t *map;                                                          \
+    name##_map_entry_t *current_entry;                                          \
 };                                                                              \
 typedef struct name##_map_iterator name##_map_iterator_t;                       \
+                                                                                \
 int name##_map_get_index_by_hash(name##_map_t *map, uint32_t key_hash) {        \
     return key_hash % map->capacity;                                            \
 }                                                                               \
@@ -69,6 +72,7 @@ int name##_map_next(name##_map_t *map, name##_map_entry_t **out_pointer) {      
     *out_pointer = ptr;                                                         \
     return 0;                                                                   \
 }                                                                               \
+                                                                                \
 name##_map_iterator_t name##_map_new_iterator(name##_map_t *map) {              \
     name##_map_iterator_t iter;                                                 \
     iter.map = map;                                                             \
@@ -82,6 +86,7 @@ type_t* name##_map_iterate_next(name##_map_iterator_t *iterator) {              
     iterator->current_entry = pointer;                                          \
     return &(pointer->value);                                                   \
 }                                                                               \
+                                                                                \
 name##_map_t* name##_map_new(){                                                 \
     name##_map_t *map = (name##_map_t *) malloc(sizeof(name##_map_t));          \
     name##_map_create(map, 256);                                                \
@@ -91,6 +96,7 @@ void name##_map_delete(name##_map_t *map){                                      
     name##_map_destroy(map);                                                    \
     free(map);                                                                  \
 }                                                                               \
+                                                                                \
 int name##_map_put(name##_map_t *map, uint32_t key, type_t value){              \
     int index = name##_map_get_index_by_hash(map, key);                         \
     int probes = 0;                                                             \

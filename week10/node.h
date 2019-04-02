@@ -11,7 +11,7 @@
 
 #define SERVER_PORT 22022
 
-#define SERVER_WORKERS 8
+#define MAX_SERVER_WORKERS 8
 
 /**
  * Request:
@@ -112,14 +112,31 @@
 
 #define MAX_PAYLOAD_LENGTH 0x00100000 //1 MB
 
-//typedef unsigned char uint8_t;
+#ifdef __GNUC__
+# define __PURE __attribute((pure))
+# define __PACKED __attribute((packed))
+# define __UNUSED __attribute((unused))
+# define __DESTRUCTOR(priority) __attribute((destructor(priority)))
+# define __CONSTRUCTOR(priority) __attribute((constructor(priority)))
+#else
+# define __PURE
+# define __PACKED
+# define __UNUSED
+# define __DESTRUCTOR
+# define __CONSTRUCTOR
+#endif
+
+#define __CLI_FUNC
+#define __FLAG_FUNC
+#define __SERV_FUNC
+#define __UTIL_FUNC
 
 
 struct node {
     //uint32_t = 4 bytes
-    in_addr_t address;
+    in_addr_t address __PACKED;
     //uint16_t = 2 bytes
-    in_port_t port;
+    in_port_t port __PACKED;
     //1 bytes
     uint8_t name_length;
     //name_length bytes
@@ -135,6 +152,7 @@ struct client_info {
     int32_t cur_conn;
     int32_t failed_syn;
     uint8_t trusted;
+    pthread_mutex_t lock;
 };
 
 #define CLIENT_HASH(address, port) \
@@ -168,24 +186,6 @@ typedef struct client_info client_info_t;
 typedef struct server_config server_config_t;
 typedef struct server_worker server_worker_t;
 
-#ifdef __GNUC__
-# define __PURE __attribute((pure))
-# define __UNUSED __attribute((unused))
-# define __DESTRUCTOR(priority) __attribute((destructor(priority)))
-# define __CONSTRUCTOR(priority) __attribute((constructor(priority)))
-#else
-# define __PURE
-# define __UNUSED
-# define __DESTRUCTOR
-# define __CONSTRUCTOR
-#endif
-
-#define __CLI_FUNC
-#define __FLAG_FUNC
-#define __SERV_FUNC
-#define __UTIL_FUNC
-
-#define EMPTY_BUFFER(var_name, size) char var_name[size]; bzero(var_name,size);
 
 #define PROCESSING_FUNC_LENGTH 32
 #define FLAG_FUNC_LENGTH 64
@@ -195,14 +195,5 @@ typedef int (*process_command_func_t)(server_worker_t * /* context of call */, i
 
 //returns count of additionally read arguments
 typedef int (*flag_func_t)(int /* flag_index */, int /* argc */, char ** /* argv */);
-
-process_command_func_t processing_functions[PROCESSING_FUNC_LENGTH];
-flag_func_t flag_functions[FLAG_FUNC_LENGTH];
-
-#define SET_PF(func_name, func) processing_functions[func_name] = &(func);
-#define SET_FF(flag_ascii, func) flag_functions[((int)(flag_ascii))-64] = &(func);
-
-#define HTONL(value) ( server_config.enable_hton ? htonl(value) : (value) )
-#define NTOHL(value) ( server_config.enable_hton ? ntohl(value) : (value) )
 
 #endif //NETWORKS_LABS_NODE_H
