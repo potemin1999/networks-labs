@@ -24,15 +24,19 @@
 #define LOCK(mutex_ptr) pthread_mutex_lock(mutex_ptr)
 #define UNLOCK(mutex_ptr) pthread_mutex_unlock(mutex_ptr)
 
-#define CLIENT_DUMP_METRICS(client_ptr)              \
+#define CLIENT_DUMP_METRICS(client_ptr){             \
     LOGf(INFO, "client %u : current connections[%d],"\
-        "failed syncs[%d], failed requests[%d]",     \
+            "failed syncs[%d], failed requests[%d], "\
+            "trust [%d]"                             \
         client_ptr,client_ptr->cur_conn,             \
-        client_ptr->failed_syn,client_ptr->cur_conn) \
+        client_ptr->failed_syn,client_ptr->cur_conn, \
+        client_ptr->trusted)                         \
+    }
 
-#define CLIENT_WAS_BLACKLISTED(client_ptr, reason)                 \
+#define CLIENT_WAS_BLACKLISTED(client_ptr, reason){                \
     LOGf(INFO,"Node with identity %u have been blacklisted due to "\
-        reason,client_ptr->address);
+        reason,client_ptr->address);                               \
+    }
 
 #define CLIENT_MOD_VAR(client_ptr, var_name, value){    \
     LOCK(&client_ptr->lock);                            \
@@ -43,29 +47,36 @@
 #define CLIENT_MOD_FAILEDSYN(client_ptr, value){                \
     CLIENT_MOD_VAR(client_ptr,failed_syn,value)                 \
     CLIENT_DUMP_METRICS(client_ptr)                             \
-    if (client_ptr->failed_syn > 5)                             \
+    if (client_ptr->failed_syn > CLIENT_MAX_SYN_FAILS){         \
         CLIENT_WAS_BLACKLISTED(client_ptr,"failed syncs")       \
-    }
+    }}
 
 #define CLIENT_MOD_FAILEDREQ(client_ptr, value){                \
     CLIENT_MOD_VAR(client_ptr,failed_req,value)                 \
     CLIENT_DUMP_METRICS(client_ptr)                             \
-    if (client_ptr->failed_req > 5)                             \
+    if (client_ptr->failed_req > CLIENT_MAX_REQ_FAILS){         \
         CLIENT_WAS_BLACKLISTED(client_ptr,"failed requests")    \
-    }
+    }}
 
 #define CLIENT_MOD_CURCONN(client_ptr, value){                  \
     CLIENT_MOD_VAR(client_ptr,cur_conn,value)                   \
-        CLIENT_DUMP_METRICS(client_ptr)                         \
-    if (client_ptr->cur_conn > 10 )                             \
+    CLIENT_DUMP_METRICS(client_ptr)                             \
+    if (client_ptr->cur_conn > CLIENT_MAX_CONNECTIONS ){        \
         CLIENT_WAS_BLACKLISTED(client_ptr,"open connections")   \
-    }
+    }}
 
+#define SEND__WARN_INT(socket, ptr, size){                  \
+    ssize_t sent_size = send(socket,ptr,size,MSG_NOSIGNAL); \
+    if (sent_size == -1){                                   \
+        LOG(WARN,"Send error")                              \
+        return -1;                                          \
+    }}
 
 CREATE_HASH_MAP(clients, client_info_t)
 
 clients_map_t clients;
 storage_t *storage;
+pthread_t pinger_thread;
 pthread_t server_thread;
 uint32_t server_workers = 0;
 server_config_t server_config;
@@ -235,21 +246,20 @@ int is_trusted_client(in_addr_t address, in_port_t port) {
         client_info.failed_req = 0;
         client_info.trusted = 2;
         clients_map_put(&clients, hash, client_info);
-        LOG(INFO, "new client")
         return 1;
     }
     LOCK(&info->lock);
     int ret_value = 2;
-    if (info->failed_syn > 5) {
+    if (info->failed_syn > CLIENT_MAX_SYN_FAILS) {
         ret_value = 0;
         goto end;
     }
-    if (info->failed_req > 5) {
+    if (info->failed_req > CLIENT_MAX_REQ_FAILS) {
         ret_value = 0;
         goto end;
     }
-    if (info->cur_conn > 4) {
-        if (info->cur_conn > 10) {
+    if (info->cur_conn > CLIENT_WARN_CONNECTIONS) {
+        if (info->cur_conn > CLIENT_MAX_CONNECTIONS) {
             info->trusted = 0;
             ret_value = 0;
         } else {
@@ -259,7 +269,6 @@ int is_trusted_client(in_addr_t address, in_port_t port) {
     }
     end:
     UNLOCK(&info->lock);
-    //LOGf(INFO, "client trust : %d", ret_value)
     return ret_value;
 }
 
@@ -345,17 +354,14 @@ int do_bootstrap(const char *ip, uint16_t port) {
     return 0;
 }
 
-__CLI_FUNC //COMMAND_SYN; lab9
-int do_syn(const char *ip, uint16_t port) {
-    int socket = connect_to(ip, port);
-    if (socket == -1) {
-        LOG(ERROR, "Syn failed: unable to connect to target server")
-        return -1;
-    } else {
-        LOG(INFO, "Syn started")
-    }
+int do_syn_sock(int socket) {
     uint32_t command = HTONL(COMMAND_SYN);
-    send(socket, &command, 4, 0);
+    SEND__WARN_INT(socket, &command, 4)
+    /*ssize_t command_sent_size = send(socket, &command, 4, MSG_NOSIGNAL);
+    if (command_sent_size == -1){
+        LOG(WARN,)
+        return -1;
+    }*/
     //1: send info about us
     EMPTY_BUFFER(buffer_start, 1024)
     char *buffer = buffer_start;
@@ -377,11 +383,15 @@ int do_syn(const char *ip, uint16_t port) {
             limit++;
         }
     }
-    //send count of our nodes
-    send(socket, buffer_start, 1024, 0);
+    SEND__WARN_INT(socket, buffer_start, 1024)
+    /*ssize_t files_sent_size = send(socket, buffer_start, 1024, MSG_NOSIGNAL);
+    if (files_sent_size == -1){
+        return -1;
+    }*/
     LOGf(DEBUG, "pushing %s to syn server", buffer_start)
 
     closedir(dir);
+    //send count of our nodes
     uint32_t stor_size = HTONL(storage->size);
     send(socket, &stor_size, 4, 0);
     usleep(50000);
@@ -393,9 +403,37 @@ int do_syn(const char *ip, uint16_t port) {
         char *node_addr = inet_ntoa(*((struct in_addr *) &current_node->address));
         bzero(buffer, 1024);
         sprintf(buffer, "%s:%s:%hu", current_node->name, node_addr, current_node->port);
-        send(socket, buffer, 1024, 0);
+        SEND__WARN_INT(socket, buffer, 1024)
+        /*ssize_t file_sent_size = send(socket, buffer, 1024, 0);
+        if (file_sent_size == -1){
+            return -1;
+        }*/
     }
     return 0;
+}
+
+__CLI_FUNC //COMMAND_SYN, char* mode; lab9
+int do_syn(const char *ip, uint16_t port) {
+    int socket = connect_to(ip, port);
+    if (socket == -1) {
+        LOG(ERROR, "Syn failed: unable to connect to target server")
+        return -1;
+    } else {
+        LOG(OUT, "Syn started")
+    }
+    int ret_value = do_syn_sock(socket);
+    if (ret_value == 0) {
+        LOG(OUT, "Syn successfully finished")
+    } else {
+        LOG(OUT, "Syn failed, see log for details")
+    }
+    return ret_value;
+}
+
+__CLI_FUNC//COMMAND_SYN, addr mode; lab10
+int do_syn_addr(in_addr_t addr, uint16_t port) {
+    int socket = connect_to_addr(addr, port);
+    return do_syn_sock(socket);
 }
 
 __CLI_FUNC //COMMAND_REQUEST: lab9
@@ -517,9 +555,9 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     UNUSED(worker)
     EMPTY_BUFFER(buffer_holder, 1024)
     char *buffer = buffer_holder;
-    ssize_t msg1size = recv(comm_socket, buffer, 1024, MSG_NOSIGNAL);
-    if (msg1size <= 0) {
-        LOG(ERROR, "Unable to parse 1st message")
+    ssize_t init_msg_size = recv(comm_socket, buffer, 1024, MSG_NOSIGNAL);
+    if (init_msg_size <= 0) {
+        LOGf(WARN, "Client %d sent invalid 1st sync message", client->address)
         CLIENT_MOD_FAILEDSYN(client, 1)
         return 1;
     }
@@ -533,7 +571,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     //add or update node
     struct hostent *host = gethostbyname(address_str);
     if (!host) {
-        LOG(ERROR, "Unable to parse hostent")
+        LOG(WARN, "Unable to parse hostent")
         CLIENT_MOD_FAILEDSYN(client, 1)
         return 11;
     }
@@ -558,11 +596,11 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     uint32_t peers_count = 0;
     ssize_t msg2size = recv(comm_socket, &peers_count, 4, MSG_NOSIGNAL);
     if (msg2size != 4) {
-        LOGf(ERROR, "Invalid peers value size: %lu", msg2size)
+        LOGf(WARN, "Invalid peers value size received from client %d : %lu", client->address, msg2size)
         CLIENT_MOD_FAILEDSYN(client, 1)
         return 2;
     } else {
-        LOGf(INFO, "Peers count: %lu", peers_count)
+        LOGf(DEBUG, "Peers count: %lu", NTOHL(peers_count))
     }
     peers_count = NTOHL(peers_count);
     for (uint32_t i = 0; i < peers_count && i < 1000; i++) {
@@ -571,7 +609,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
         sscanf(buffer, "%127[^:]:%19[^:]:%5[^:]:", peer_node.name, address_str, port_str);
         struct hostent *peer_host_ptr = gethostbyname(address_str);
         if (!peer_host_ptr) {
-            LOGf(ERROR, "Unable to get hostent: %lu", msg2size)
+            LOGf(WARN, "Unable to get hostent: %lu", msg2size)
             CLIENT_MOD_FAILEDSYN(client, 1)
             return 3;
         }
@@ -580,7 +618,7 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
         peer_node.port = (uint16_t) strtoul(port_str, &port_end, 10);
         int res = storage_node_added(storage, peer_node);
         if (res == -1) continue;
-        LOGf(DEBUG, "New node retrieved: %s at %s:%hu", peer_node.name, address_str, peer_node.port)
+        LOGf(WARN, "New node retrieved: %s at %s:%hu", peer_node.name, address_str, peer_node.port)
     }
     LOCK(&client->lock);
     client->failed_syn -= client->failed_syn > 2 ? 2 : client->failed_syn;
@@ -592,15 +630,24 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
 __SERV_FUNC //COMMAND_REQUEST, lab 9
 int process_command_request(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
+    UNUSED(client->trusted)
     EMPTY_BUFFER(buffer, 1024)
     recv(comm_socket, buffer, 1024, MSG_NOSIGNAL);
     char *file_name = buffer;
     FILE *file = fopen(file_name, "rb");
+    ssize_t word_count_sent_size = 0;
     if (file == 0) {
         int32_t words_count = -1;
         words_count = (int32_t) HTONL((uint32_t) words_count);
-        send(comm_socket, &words_count, 4, MSG_NOSIGNAL);
-        CLIENT_MOD_FAILEDREQ(client, 1)
+        word_count_sent_size = send(comm_socket, &words_count, 4, MSG_NOSIGNAL);
+        if (word_count_sent_size == -1) {
+            CLIENT_MOD_FAILEDREQ(client, 2)
+            LOGf(WARN, "Client %d requested file '%s', which does not exist,"\
+                       "and then disconnected. Double penalty applied", client->address, file_name)
+        } else {
+            CLIENT_MOD_FAILEDREQ(client, 1)
+            LOGf(WARN, "Client %d requested file '%s', which does not exist", client->address, file_name)
+        }
         return -1;
     }
     fseek(file, 0, SEEK_SET);
@@ -613,14 +660,25 @@ int process_command_request(server_worker_t *worker, int comm_socket, client_inf
         }
     }
     int32_t words_count_n = (int32_t) HTONL((uint32_t) words_count);
-    send(comm_socket, &words_count_n, 4, MSG_NOSIGNAL);
+    word_count_sent_size = send(comm_socket, &words_count_n, 4, MSG_NOSIGNAL);
+    if (word_count_sent_size == -1) {
+        CLIENT_MOD_FAILEDREQ(client, 1)
+        LOGf(WARN, "Client %d wont receive words count in requested file %s", client->address, file_name)
+        return -2;
+    }
     //send word by word
     fseek(file, 0, SEEK_SET);
     int word_length = 0;
+    ssize_t buffer_sent_size = 0;
     for (int i = 0; i < words_count; i++) {
         bzero(buffer, 1024);
         fscanf(file, "%s%n", buffer, &word_length);
-        send(comm_socket, buffer, 1024, MSG_NOSIGNAL);
+        buffer_sent_size = send(comm_socket, buffer, 1024, MSG_NOSIGNAL);
+        if (buffer_sent_size == -1) {
+            CLIENT_MOD_FAILEDREQ(client, 1)
+            LOGf(WARN, "Client %d wont receive %d word in requested file %d", client->address, i, file_name)
+            return -3;
+        }
         usleep(20000);
     }
     LOCK(&client->lock);
@@ -808,9 +866,29 @@ void *server_worker_main(void *data) {
     pthread_exit(0);
 }
 
-__SERV_FUNC __UNUSED
+__SERV_FUNC
 void *server_pinger_main(void *data) {
     UNUSED(data)
+    while (!shutdown_required) {
+        node_t *node = 0;
+        int start_size = storage->size;
+        storage_iter_t iterator = storage_new_iterator(storage);
+        while ((node = storage_next(&iterator)) != 0) {
+            if (server_config.addr == node->address &&
+                server_config.addr == node->port) {
+                //this is our node, no need to ping
+                continue;
+            }
+            if (do_syn_addr(node->address, node->port) != 0) {
+                storage_node_removed(storage, *node);
+            }
+        }
+        int finish_size = storage->size;
+        int cleaned_up = start_size - finish_size;
+        LOGf(INFO, "%d nodes pinged, %d alive, %d were cleaned up",
+             start_size, finish_size, cleaned_up)
+        sleep(15);
+    }
     return 0;
 }
 
@@ -824,13 +902,12 @@ void *server_main(void *data) {
     if (dump_getsockname(server_socket_fd) < 0) {
         exit(server_socket_fd);
     }
-    storage = storage_create();
     if (listen(server_socket_fd, 5) < 0) {
         LOG(ERROR, "Listen failed")
         exit(1);
     }
     server_sock_fd = server_socket_fd;
-    LOG(INFO, "Server is ready to accept connections")
+    LOG(OUT, "Server is ready to accept connections")
     sockaddr_in_t client_addr;
     socklen_t addr_len = sizeof(sockaddr_in_t);
     //server_worker_t main_worker;
@@ -852,7 +929,6 @@ void *server_main(void *data) {
         }
         pthread_create(&free_worker->thread, 0, server_worker_main, free_worker);
     }
-    storage_destroy(storage);
     return 0;
 }
 
@@ -985,7 +1061,7 @@ int init_flag_functions() {
 }
 
 void on_exit_signal(int signal) {
-    LOG(INFO, "Stop signal received, exiting")
+    LOG(OUT, "Stop signal received, exiting")
     exit(signal);
 }
 
@@ -993,6 +1069,7 @@ __CONSTRUCTOR(255) __UNUSED
 int pre_main() {
     signal(SIGINT, on_exit_signal);
     signal(SIGTERM, on_exit_signal);
+    storage = storage_create();
     clients_map_create(&clients, 128);
     return 0;
 }
@@ -1007,15 +1084,22 @@ int main(int argc, char **argv) {
     printf("Write server ip: ");
     scanf("%s", hostname);
     struct hostent *host_entry = gethostbyname(hostname);
-    char *address = inet_ntoa(*((struct in_addr *) host_entry->h_addr_list[0]));
+    struct in_addr *in_addr_value = (struct in_addr *) host_entry->h_addr_list[0];
+    server_config.addr = in_addr_value->s_addr;
+    char *address = inet_ntoa(*in_addr_value);
     strcpy(server_config.node_address, address);
     pthread_create(&server_thread, 0, server_main, &server_config);
+    pthread_create(&pinger_thread, 0, server_pinger_main, 0);
     client_main();
     pthread_join(server_thread, 0);
+    pthread_join(pinger_thread, 0);
+    return 0;
 }
 
 __DESTRUCTOR(255) __UNUSED
 int post_main() {
+    storage_destroy(storage);
+    clients_map_destroy(&clients);
     LOG(INFO, "Node stopped")
     return 0;
 }

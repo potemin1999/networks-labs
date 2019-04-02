@@ -12,9 +12,10 @@
 #define SERVER_PORT 22022
 
 #define MAX_SERVER_WORKERS 8
+#define CLIENT_WARN_CONNECTIONS 5
 #define CLIENT_MAX_CONNECTIONS 10
 #define CLIENT_MAX_SYN_FAILS 5
-#define CLIENT_MAX_REQ_FAILS
+#define CLIENT_MAX_REQ_FAILS 5
 
 /**
  * Request:
@@ -155,7 +156,7 @@ struct client_info {
     int32_t cur_conn;
     int32_t failed_syn;
     int32_t failed_req;
-    uint8_t trusted __UNUSED;
+    uint8_t trusted;
     pthread_mutex_t lock;
 };
 
@@ -163,6 +164,7 @@ struct client_info {
     ((uint32_t) (address))
 
 struct server_config {
+    in_addr_t addr;
     in_port_t port;
     char port_str[6];
     char node_address[20];
