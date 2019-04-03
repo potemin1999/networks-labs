@@ -26,7 +26,7 @@
 #define UNLOCK(mutex_ptr) pthread_mutex_unlock(mutex_ptr)
 
 #define CLIENT_DUMP_METRICS(client_ptr){             \
-    LOGf(INFO, "client %u : current connections[%d],"\
+    LOGf(TRACE,"client %u : current connections[%d],"\
             "failed syncs[%d], failed requests[%d], "\
             "trust [%d]",                            \
         client_ptr,client_ptr->cur_conn,             \
@@ -80,6 +80,7 @@ storage_t *storage;
 pthread_t dos_thread;
 pthread_t pinger_thread;
 pthread_t server_thread;
+pthread_t security_thread;
 uint32_t server_workers = 0;
 server_config_t server_config;
 int server_sock_fd;
@@ -222,7 +223,7 @@ int read_startup_flags(int argc, char **argv) {
             exit(1);
         }
         char *argument = argv[i];
-        int index = (int) (argument[1] - 64);
+        int index = argument[1] - 64;
         flag_func_t func = flag_functions[index];
         if (func == 0) {
             LOGf(ERROR, "Unknown flag %s", argument)
@@ -242,7 +243,7 @@ __UTIL_FUNC
 int is_trusted_client(in_addr_t address, in_port_t port) {
     uint32_t hash = CLIENT_HASH(address, port);
     client_info_t *info = clients_map_get(&clients, hash);
-    if (info->address == 0) {
+    if (info == 0 || info->address == 0) {
         client_info_t client_info;
         client_info.port = port;
         client_info.address = address;
@@ -250,11 +251,13 @@ int is_trusted_client(in_addr_t address, in_port_t port) {
         client_info.failed_syn = 0;
         client_info.failed_req = 0;
         client_info.trusted = 2;
+        client_info.req_counter = 0;
+        pthread_mutex_init(&client_info.lock, 0);
         clients_map_put(&clients, hash, client_info);
         return 1;
     }
     LOCK(&info->lock);
-    int ret_value = 2;
+    int ret_value = info->trusted;
     if (info->failed_syn > CLIENT_MAX_SYN_FAILS) {
         ret_value = 0;
         goto end;
@@ -294,7 +297,7 @@ int set_server_port(int flag_index, int argc, char **argv) {
     }
     char port_buffer[8], *buffer_end;
     strcpy(port_buffer, argv[flag_index + 1]);
-    int read = strtoul(port_buffer, &buffer_end, 10);
+    unsigned long read = strtoul(port_buffer, &buffer_end, 10);
     server_config.port = (in_port_t) read;
     if (read != 0) {
         LOGf(INFO, "Server port set: %hu", server_config.port)
@@ -368,7 +371,15 @@ int do_dos(const char *ip, uint16_t port, uint16_t thread_count) {
         return -1;
     }
     struct hostent *host = gethostbyname(ip);
+    if (host == 0) {
+        LOG(OUT, "Unable to resolve hostent")
+        return -1;
+    }
     struct in_addr *in_addr_value = (struct in_addr *) host->h_addr_list[0];
+    if (in_addr_value == 0) {
+        LOG(OUT, "Unable to resolve address")
+        return -1;
+    }
     node_t *target_node = NEW_NODE();
     target_node->name[0] = 0;
     target_node->thread_count = thread_count;
@@ -450,6 +461,7 @@ int do_syn(const char *ip, uint16_t port) {
 __CLI_FUNC//COMMAND_SYN, addr mode; lab10
 int do_syn_addr(in_addr_t addr, uint16_t port) {
     int socket = connect_to_addr(addr, port);
+    if (socket == -1) return -1;
     return do_syn_sock(socket);
 }
 
@@ -689,7 +701,7 @@ int process_command_request(server_worker_t *worker, int comm_socket, client_inf
     size_t part_read_size;
     while ((part_read_size = fread(buffer, 1, 1024, file)) > 0) {
         for (int i = 0; i < part_read_size; i++) {
-            if (buffer[i] == ' ' || buffer[i] == '\0') words_count++;
+            if (buffer[i] == ' ' /* || buffer[i] == '\0' */) words_count++;
         }
     }
     int32_t words_count_n = (int32_t) HTONL((uint32_t) words_count);
@@ -856,7 +868,10 @@ int process_comm_socket(server_worker_t *worker, int comm_socket, in_addr_t clie
     UNUSED(client_port)
     uint32_t client_hash = CLIENT_HASH(client_addr, client_port);
     client_info_t *client = clients_map_get(&clients, client_hash);
-    CLIENT_MOD_CURCONN(client, 1)
+    LOCK(&client->lock);
+    client->req_counter++;
+    client->cur_conn++;
+    UNLOCK(&client->lock);
     uint32_t command = 0;
     ssize_t read_bytes = recv(comm_socket, &command, 4, 0);
     command = NTOHL(command);
@@ -927,6 +942,32 @@ void *server_pinger_main(void *data) {
 }
 
 __SERV_FUNC __THREAD_FUNC
+void *server_security_main(void *data) {
+    UNUSED(data);
+    security_loop_start:
+    UNUSED(pthread_self());
+    clients_map_iterator_t iter = clients_map_new_iterator(&clients);
+    client_info_t *client;
+    unsigned int sleep_time = 3;
+    int max_counter = CLIENT_MAX_CONNECTION_RATE * sleep_time;
+    while ((client = clients_map_iterate_next(&iter)) != 0) {
+        LOCK(&client->lock);
+        if (client->req_counter > max_counter) {
+            client->trusted = 0;
+            LOGf(INFO, "Client %d have been blacklisted due to request rate", client->address)
+        }
+        client->req_counter = 0;
+        UNLOCK(&client->lock);
+    }
+    if (shutdown_required)
+        goto security_loop_end;
+    sleep(sleep_time);
+    goto security_loop_start;
+    security_loop_end:
+    return 0;
+}
+
+__SERV_FUNC __THREAD_FUNC
 void *server_main(void *data) {
     server_config_t *cfg = (server_config_t *) data;
     int server_socket_fd = 0;
@@ -952,6 +993,7 @@ void *server_main(void *data) {
             continue;
         }
         if (is_trusted_client(client_addr.sin_addr.s_addr, client_addr.sin_port) == 0) {
+            LOG(DEBUG, "Connection rejected")
             close(socket);
             continue;
         }
@@ -975,20 +1017,19 @@ void *client_ping_worker_main(void *data) {
         if (syn_r == -1) goto err_syn;
         DCLi(pen_s, int, connect_to_addr(addr, port))
         if (pen_s == -1) continue;
-        uint32_t cmd1 = COMMAND_SYN;
+        DCLi(cmd1, uint32_t, COMMAND_SYN);
         _S(pen_s, &cmd1, 4, MSG_NOSIGNAL)
-        DCL(buffer[16], char)
+        DCLi(buffer, void*, malloc(16))
         memset(buffer, 32, 16);
-        bzero(buffer, 16);
-        strcpy(buffer, "lc:127.0.0.1");
-        buffer[strlen(buffer)] = ':';
+        strcpy(T_C$(buffer), "lc:127.0.0.1");
+        *T_C$(buffer + strlen(buffer)) = ':';
         _S(pen_s, buffer, 16, MSG_NOSIGNAL)
         close(pen_s);
     }
     goto ret;
-    err_syn:
-LOG(WARN, "DOS Syn failed, exiting")
-    return 0;
+    err_syn: //@formatter:off
+    LOG(WARN, "DOS Syn failed, exiting")
+    return 0; //@formatter:on
     ret:
     return 0;
 }
@@ -1135,6 +1176,13 @@ void *client_main(void) {
             }
             continue;
         }
+        if (strcmp(buffer, "list_db") == 0) {
+            storage_iter_t iterator = storage_new_iterator(storage);
+            node_t *node = 0;
+            while ((node = storage_next(&iterator)) != 0) {
+                LOGf(OUT, "Contains node %s", node->name)
+            }
+        }
         bzero(buffer, 512);
     }
     return 0;
@@ -1193,11 +1241,13 @@ int main(int argc, char **argv) {
     server_config.addr = in_addr_value->s_addr;
     char *address = inet_ntoa(*in_addr_value);
     strcpy(server_config.node_address, address);
+    pthread_create(&security_thread, 0, server_security_main, 0);
     pthread_create(&server_thread, 0, server_main, &server_config);
     pthread_create(&pinger_thread, 0, server_pinger_main, 0);
     client_main();
     pthread_join(server_thread, 0);
     pthread_join(pinger_thread, 0);
+    pthread_join(security_thread, 0);
     return 0;
 }
 

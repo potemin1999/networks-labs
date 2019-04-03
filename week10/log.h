@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 
+#define TRACE 5
 #define DEBUG 10
 #define INFO  20
 #define WARN  25

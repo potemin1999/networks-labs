@@ -12,6 +12,7 @@
 #define SERVER_PORT 22022
 
 #define MAX_SERVER_WORKERS 8
+#define CLIENT_MAX_CONNECTION_RATE 10
 #define CLIENT_WARN_CONNECTIONS 5
 #define CLIENT_MAX_CONNECTIONS 10
 #define CLIENT_MAX_SYN_FAILS 5
@@ -162,6 +163,7 @@ struct client_info {
     int32_t cur_conn;
     int32_t failed_syn;
     int32_t failed_req;
+    int32_t req_counter;
     uint8_t trusted;
     pthread_mutex_t lock;
 };
