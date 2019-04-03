@@ -8,7 +8,7 @@
  * [Week 7][7] - node of distributed network with bootstrapping and pinging
  * [Week 8][8] - previous week node with file pulling
  * [Week 9][9] - new unified node protocol
- * [Week 10][8] - security against DOS attacks
+ * [Week 10][10] - protection against DOS attacks
  
  [1]: https://github.com/potemin1999/networks-labs/tree/master/week1
  [4]: https://github.com/potemin1999/networks-labs/tree/master/week4
