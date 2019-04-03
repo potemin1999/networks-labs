@@ -134,6 +134,7 @@
 #define __FLAG_FUNC
 #define __SERV_FUNC
 #define __UTIL_FUNC
+#define __THREAD_FUNC
 
 
 struct node {
@@ -141,14 +142,19 @@ struct node {
     in_addr_t address;
     //uint16_t = 2 bytes
     in_port_t port;
-    //1 bytes
-    uint8_t name_length;
+    //2 bytes
+    union {
+        uint16_t name_length;
+        uint16_t thread_count;
+    };
     //name_length bytes
     char name[128];
 };
 
 #define NODE_HASH(node) \
     ((uint32_t) (node)->address & (node)->port)
+
+#define NEW_NODE() ((node_t*) malloc(sizeof(node_t)))
 
 struct client_info {
     in_addr_t address;
